@@ -19,10 +19,17 @@ This document explains how we built the simulator, the modeling choices, and key
 - RR: Baseline fairness.
 - MAF: Focus on worst (stale) node first.
 - AWN: Balance urgency (AoI) and proximity (distance) with tunable β, γ.
+  - Score = AoI^β / (dist^γ + ε)
+  - In `sweep-alpha`, β and γ are dynamically adjusted based on α:
+    - β = 0.8 + α × 0.8 (range: 0.8 to 1.6)
+    - γ = 1.6 - α × 1.0 (range: 1.6 to 0.6)
+    - This makes α truly affect decision-making, not just reporting.
 
 ## Routing Heuristics
 - Nearest Neighbor to initialize a tour; then refine with 2-Opt.
 - Greedy mode: ignore a fixed tour and pick next node by the chosen policy at each step.
+  - Used in `compare-policies` to ensure policies produce different results.
+  - Used in `sweep-alpha` to allow α-driven β/γ changes to affect behavior.
 
 ## Simulation Loop
 - At each iteration:
@@ -36,7 +43,13 @@ This document explains how we built the simulator, the modeling choices, and key
 ## Metrics & Reporting
 - CSV logs per run for reproducibility.
 - Aggregate metrics: average AoI, max, p99, total energy, energy/update.
-- Pareto sweep over α reports the joint objective trend (for analysis/reporting only).
+- **Single Session Folders**: Each command creates one timestamped folder (`runs/YYYYMMDD_HHMMSS/`) containing:
+  - All plots (PNG files with config footers)
+  - CSV logs (individual run logs in subfolders for multi-run commands)
+  - `resolved_config.yaml` (exact configuration used, matches plot footers)
+- **Config Footers**: Every plot includes a footer showing: Policy, Seed, β, γ, α, N, T, Battery, Payload, Comm Radius.
+- **Alpha-Aware Sweep**: `sweep-alpha` produces different results for each α by dynamically adjusting β and γ, creating a meaningful Pareto curve.
+- **Scenario Locking**: Within a command, all sub-runs share the same seed/environment for fair comparison.
 
 ## Trade-offs & Simplifications
 - No altitude or 3D movement.

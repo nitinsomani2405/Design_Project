@@ -27,8 +27,18 @@ This project simulates a single UAV that serves N ground IoT nodes on a 2D plane
 ## Metrics & Visualization
 - Metrics: average AoI, max AoI, p99 AoI, total energy, energy per update.
 - Plots: AoI vs time, energy vs time, route path, policy comparison bars, AoI–Energy Pareto curve (by α).
+- All plots include config footers showing exact parameters used (Policy, Seed, β, γ, α, N, T, Battery, Payload, Comm Radius).
+- Each run saves `resolved_config.yaml` with the exact configuration used.
+
+## Key Features
+- **Automatic Parameter Randomization**: Unspecified parameters (seed, policy, β, γ, α, payload) are randomly selected for unique runs.
+- **Single Session Folders**: Each command creates one timestamped folder with all outputs organized together.
+- **Alpha-Aware Sweep**: In `sweep-alpha`, α dynamically adjusts β and γ parameters, producing different trade-offs:
+  - High α → high β, low γ (prioritize freshness)
+  - Low α → low β, high γ (prioritize energy efficiency)
+- **Deterministic Scenario Locking**: Within a single command, all sub-runs use the same seed/environment for fair comparison.
 
 ## Why This Matters
-AoI captures information freshness, crucial for time-sensitive IoT data. UAVs provide mobility but have tight energy budgets. This simulator helps explore design choices balancing freshness and energy.
+AoI captures information freshness, crucial for time-sensitive IoT data. UAVs provide mobility but have tight energy budgets. This simulator helps explore design choices balancing freshness and energy, with automatic parameter exploration and consistent scenario management.
 
 

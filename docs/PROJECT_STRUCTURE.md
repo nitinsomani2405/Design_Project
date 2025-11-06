@@ -14,6 +14,11 @@ Design_Project/
 │  ├─ sweep_alpha.py          # Alpha sweep (Pareto)
 │  └─ sweep_nodes.py          # N sweep
 ├─ runs/                      # Outputs (created at runtime)
+│  └─ YYYYMMDD_HHMMSS/       # Single session folder per command
+│     ├─ resolved_config.yaml # Exact config used (matches plot footers)
+│     ├─ log.csv              # Simulation log (for single runs)
+│     ├─ *.png                # Plots with config footers
+│     └─ subfolders/          # Individual run logs (for multi-run commands)
 ├─ tests/
 │  ├─ conftest.py             # Adds project root to PYTHONPATH for pytest
 │  ├─ test_aoi_updates.py
@@ -41,8 +46,18 @@ Design_Project/
 - `uav_aoi/planner.py`: Policies (RR/MAF/AWN) and routing (Nearest-Neighbor, 2-Opt).
 - `uav_aoi/sim.py`: Implements the simulation loop, logging, and route/greedy modes.
 - `uav_aoi/metrics.py`: Loads logs and computes summary statistics.
-- `uav_aoi/viz.py`: Generates plots.
+- `uav_aoi/viz.py`: Generates plots with config footers.
 - `uav_aoi/config.py`: Loads configs from YAML/JSON.
-- `main.py`: Orchestrates runs and plotting via CLI.
+- `main.py`: CLI entrypoint with:
+  - Parameter randomization for unspecified values
+  - Single session folder management
+  - Alpha-aware sweep (dynamic β/γ adjustment)
+  - Scenario locking (same seed/environment per command)
+  - Config footer generation for plots
+
+## Output Organization
+- **Single Session Folders**: Each command (`run`, `compare-policies`, `sweep-alpha`) creates one timestamped folder.
+- **Config Traceability**: `resolved_config.yaml` saved in each session folder matches plot footers exactly.
+- **Multi-Run Commands**: `compare-policies` and `sweep-alpha` create subfolders for individual run logs while keeping summary files at the session level.
 
 

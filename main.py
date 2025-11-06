@@ -131,6 +131,31 @@ def randomize_unspecified(cfg: Dict[str, Any], args: argparse.Namespace, locked_
     return cfg
 
 
+def create_session_folder(args: argparse.Namespace, base: str = "runs") -> str:
+    """Create a single timestamped folder for this command session.
+    
+    Supports --out <dir> or --session-id <name> to customize folder name.
+    Priority: --session-id > --out > timestamp
+    """
+    if hasattr(args, "session_id") and args.session_id:
+        # Custom session ID (highest priority)
+        path = os.path.join(base, args.session_id)
+    elif hasattr(args, "out") and args.out:
+        # Custom output directory
+        if os.path.isabs(args.out):
+            path = args.out
+        else:
+            path = os.path.join(base, args.out)
+    else:
+        # Default: timestamped folder
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(base, ts)
+    
+    ensure_dir(path)
+    return path
+
+
 def build_subtitle(cfg: Dict[str, Any]) -> str:
     u = cfg["uav"]
     r = cfg["radio"]
@@ -144,6 +169,9 @@ def build_subtitle(cfg: Dict[str, Any]) -> str:
 
 
 def do_run(args: argparse.Namespace) -> None:
+    # Create single session folder for this command
+    session_dir = create_session_folder(args)
+    
     # Lock seed for this command
     locked_seed = lock_scenario_seed(args)
     
@@ -167,18 +195,18 @@ def do_run(args: argparse.Namespace) -> None:
         greedy_mode=bool(cfg.get("greedy_mode", False)),
         hover_cap_s=None,
     )
-    summary = simulate(nodes, uav, radio, params, seed)
+    # Pass session_dir to simulate - it will save log.csv there
+    summary = simulate(nodes, uav, radio, params, seed, run_dir=session_dir)
 
-    # Plots
-    run_dir = summary["run_dir"]
-    # Save resolved config for traceability
-    with open(os.path.join(run_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
+    # Save resolved config for traceability (must match plot footers)
+    with open(os.path.join(session_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
 
+    # All outputs go to session_dir
     log_csv = summary["log_csv"]
-    aoi_png = os.path.join(run_dir, "aoi_time.png")
-    energy_png = os.path.join(run_dir, "energy_time.png")
-    route_png = os.path.join(run_dir, "route.png")
+    aoi_png = os.path.join(session_dir, "aoi_time.png")
+    energy_png = os.path.join(session_dir, "energy_time.png")
+    route_png = os.path.join(session_dir, "route.png")
     subtitle = build_subtitle(cfg)
     plot_aoi_time(log_csv, aoi_png, subtitle=subtitle)
     plot_energy_time(log_csv, energy_png, subtitle=subtitle)
@@ -186,13 +214,16 @@ def do_run(args: argparse.Namespace) -> None:
     plot_route(params.field_size, positions, summary["visited_path"], route_png, subtitle=subtitle)
 
     m = compute_metrics(log_csv)
-    print("Run complete:")
+    print(f"Run complete: {session_dir}")
     print(f"  log: {log_csv}")
     print(f"  avg_aoi={m['avg_aoi']:.2f}s, max_aoi={m['max_aoi']:.2f}s, p99={m['p99_aoi']:.2f}s")
     print(f"  energy={m['total_energy_Wh']:.3f} Wh")
 
 
 def do_sweep_alpha(args: argparse.Namespace) -> None:
+    # Create single session folder for this command
+    session_dir = create_session_folder(args)
+    
     # Lock seed for this command - same environment for all alpha values
     locked_seed = lock_scenario_seed(args)
     
@@ -213,17 +244,34 @@ def do_sweep_alpha(args: argparse.Namespace) -> None:
     # Same nodes for all alpha values
     nodes = init_nodes_random(N, (float(field_size[0]), float(field_size[1])), rng)
     
-    run_dir = args.out or "runs"
-    ensure_dir(run_dir)
-    results_csv = os.path.join(run_dir, "pareto_results.csv")
+    # Parse --alphas if provided, otherwise default to [0, 0.25, 0.5, 0.75, 1.0]
+    if hasattr(args, "alphas") and args.alphas:
+        alphas = [float(a) for a in args.alphas]
+    else:
+        alphas = np.linspace(0.0, 1.0, num=5).tolist()
     
-    # Default alpha sweep: [0, 0.25, 0.5, 0.75, 1.0] (5 points)
-    alphas = np.linspace(0.0, 1.0, num=5).tolist()
+    # Alpha-aware β and γ ranges
+    # High α → focus on AoI (high β, low γ)
+    # Low α → focus on energy (low β, high γ)
+    beta_min, beta_max = 0.8, 1.6
+    gamma_min, gamma_max = 0.6, 1.6
+    
+    # Ensure policy is AWN for alpha to have effect (or use greedy mode)
+    policy_for_sweep = str(cfg.get("policy", "AWN"))
+    if policy_for_sweep.upper() not in ["AWN"]:
+        print(f"Warning: Policy is {policy_for_sweep}, but alpha sweep works best with AWN. Using AWN for sweep.")
+        policy_for_sweep = "AWN"
+    
+    results_csv = os.path.join(session_dir, "pareto_results.csv")
     
     with open(results_csv, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["alpha", "avg_aoi", "energy_norm"])
+        writer.writerow(["alpha", "avg_aoi", "energy_norm", "beta", "gamma"])
         for alpha_val in alphas:
+            # Dynamically adjust β and γ based on α
+            beta_val = beta_min + alpha_val * (beta_max - beta_min)
+            gamma_val = gamma_max - alpha_val * (gamma_max - gamma_min)
+            
             # Fresh UAV per run
             uav = UAV(
                 x=0.0,
@@ -238,32 +286,43 @@ def do_sweep_alpha(args: argparse.Namespace) -> None:
                 field_size=(float(field_size[0]), float(field_size[1])),
                 mission_time_s=float(cfg["mission_time_s"]),
                 payload_bits=int(cfg["payload_bits"]),
-                policy=str(cfg["policy"]),
-                beta=float(cfg["beta"]),
-                gamma=float(cfg["gamma"]),
+                policy=policy_for_sweep,
+                beta=float(beta_val),
+                gamma=float(gamma_val),
                 alpha=float(alpha_val),
-                greedy_mode=bool(cfg.get("greedy_mode", False)),
+                greedy_mode=True,  # Force greedy mode so β/γ changes affect behavior
                 hover_cap_s=None,
             )
-            summary = simulate(nodes, uav, radio, params, seed)
+            # Each simulate call creates its own log.csv in session_dir
+            # Use a subfolder or unique name to avoid overwriting
+            alpha_dir = os.path.join(session_dir, f"alpha_{alpha_val:.2f}")
+            summary = simulate(nodes, uav, radio, params, seed, run_dir=alpha_dir)
             m = compute_metrics(summary["log_csv"])
             energy_norm = m["total_energy_Wh"] / max(summary["E_max_Wh"], 1e-9)
-            writer.writerow([alpha_val, m["avg_aoi"], energy_norm])
-            print(f"  α={alpha_val:.2f}: avg_aoi={m['avg_aoi']:.2f}s, energy_norm={energy_norm:.3f}")
+            writer.writerow([alpha_val, m["avg_aoi"], energy_norm, beta_val, gamma_val])
+            print(f"  α={alpha_val:.2f} (β={beta_val:.2f}, γ={gamma_val:.2f}): avg_aoi={m['avg_aoi']:.2f}s, energy_norm={energy_norm:.3f}")
 
-    # Save resolved config (with representative alpha, e.g., 0.5)
+    # Save resolved config (with representative alpha, e.g., 0.5) - must match plot footer
     cfg_save = copy.deepcopy(cfg)
-    cfg_save["alpha"] = 0.5  # Representative value
-    with open(os.path.join(run_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
+    cfg_save["alpha"] = 0.5  # Representative value for footer
+    # Use corresponding β and γ for α=0.5
+    cfg_save["beta"] = beta_min + 0.5 * (beta_max - beta_min)
+    cfg_save["gamma"] = gamma_max - 0.5 * (gamma_max - gamma_min)
+    cfg_save["policy"] = policy_for_sweep
+    with open(os.path.join(session_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg_save, f, sort_keys=False)
 
-    pareto_png = os.path.join(run_dir, "pareto.png")
+    pareto_png = os.path.join(session_dir, "pareto.png")
     subtitle = build_subtitle(cfg_save)
     plot_pareto(results_csv, pareto_png, subtitle=subtitle)
     print(f"Pareto saved: {pareto_png} ({len(alphas)} points)")
+    print(f"Session folder: {session_dir}")
 
 
 def do_compare_policies(args: argparse.Namespace) -> None:
+    # Create single session folder for this command
+    session_dir = create_session_folder(args)
+    
     # Lock seed for this command - same environment for all policies
     locked_seed = lock_scenario_seed(args)
     
@@ -287,9 +346,7 @@ def do_compare_policies(args: argparse.Namespace) -> None:
     # Same nodes for all policies (unless vary_seed is True)
     nodes_base = init_nodes_random(N, (float(field_size[0]), float(field_size[1])), rng)
     
-    run_dir = args.out or "runs"
-    ensure_dir(run_dir)
-    summary_csv = os.path.join(run_dir, "policy_summary.csv")
+    summary_csv = os.path.join(session_dir, "policy_summary.csv")
     
     with open(summary_csv, "w", newline="") as f:
         writer = csv.writer(f)
@@ -334,21 +391,24 @@ def do_compare_policies(args: argparse.Namespace) -> None:
                 hover_cap_s=None,
             )
             
-            summary = simulate(nodes, uav, radio, params, policy_seed)
+            # Each policy gets its own subfolder to avoid log.csv overwrites
+            policy_dir = os.path.join(session_dir, policy.lower())
+            summary = simulate(nodes, uav, radio, params, policy_seed, run_dir=policy_dir)
             m = compute_metrics(summary["log_csv"])
             writer.writerow([policy, m["avg_aoi"], m["total_energy_Wh"]])
             print(f"  {policy}: avg_aoi={m['avg_aoi']:.2f}s, energy={m['total_energy_Wh']:.3f}Wh")
 
-    # Save resolved config (with representative policy, e.g., AWN)
+    # Save resolved config (with representative policy, e.g., AWN) - must match plot footer
     cfg_save = copy.deepcopy(cfg)
-    cfg_save["policy"] = "AWN"  # Representative value
-    with open(os.path.join(run_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
+    cfg_save["policy"] = "AWN"  # Representative value for footer
+    with open(os.path.join(session_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg_save, f, sort_keys=False)
 
-    bar_png = os.path.join(run_dir, "policy_compare.png")
+    bar_png = os.path.join(session_dir, "policy_compare.png")
     subtitle = build_subtitle(cfg_save)
     plot_policy_comparison(summary_csv, bar_png, subtitle=subtitle)
     print(f"Policy comparison saved: {bar_png}")
+    print(f"Session folder: {session_dir}")
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -368,10 +428,17 @@ def make_parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run", help="Run a single simulation and plots")
+    run.add_argument("--out", type=str, help="Output directory (default: timestamped folder in runs/)")
+    run.add_argument("--session-id", type=str, help="Custom session folder name (instead of timestamp)")
+    
     sweep = sub.add_parser("sweep-alpha", help="Sweep alpha and plot Pareto")
-    sweep.add_argument("--out", type=str, help="Output dir", default="runs")
+    sweep.add_argument("--out", type=str, help="Output directory (default: timestamped folder in runs/)")
+    sweep.add_argument("--session-id", type=str, help="Custom session folder name (instead of timestamp)")
+    sweep.add_argument("--alphas", type=float, nargs="+", help="Alpha values to sweep (default: 0 0.25 0.5 0.75 1)")
+    
     comp = sub.add_parser("compare-policies", help="Compare RR/MAF/AWN")
-    comp.add_argument("--out", type=str, help="Output dir", default="runs")
+    comp.add_argument("--out", type=str, help="Output directory (default: timestamped folder in runs/)")
+    comp.add_argument("--session-id", type=str, help="Custom session folder name (instead of timestamp)")
     comp.add_argument("--vary-seed-per-policy", action="store_true", 
                       help="Use different seeds for each policy (for robustness experiments)")
     return p
