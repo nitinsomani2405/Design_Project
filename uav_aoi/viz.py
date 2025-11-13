@@ -13,6 +13,9 @@ def _load_series(log_csv: str):
     energies = []
     xs = []
     ys = []
+    e_fly = []
+    e_hover = []
+    e_tx = []
     with open(log_csv, "r", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -21,11 +24,16 @@ def _load_series(log_csv: str):
             energies.append(float(row["energy_Wh"]))
             xs.append(float(row["uav_x"]))
             ys.append(float(row["uav_y"]))
-    return times, avg_aoi, energies, xs, ys
+            # Optional: energy breakdown columns (new format)
+            if "E_fly_total" in row:
+                e_fly.append(float(row["E_fly_total"]))
+                e_hover.append(float(row["E_hover_total"]))
+                e_tx.append(float(row["E_tx_total"]))
+    return times, avg_aoi, energies, xs, ys, e_fly, e_hover, e_tx
 
 
 def plot_aoi_time(log_csv: str, out_path: str, subtitle: str | None = None) -> None:
-    t, avg_aoi, _, _, _ = _load_series(log_csv)
+    t, avg_aoi, _, _, _, _, _, _ = _load_series(log_csv)
     plt.figure(figsize=(7, 4))
     plt.plot(t, avg_aoi, label="Average AoI")
     plt.xlabel("Time (s)")
@@ -41,9 +49,14 @@ def plot_aoi_time(log_csv: str, out_path: str, subtitle: str | None = None) -> N
 
 
 def plot_energy_time(log_csv: str, out_path: str, subtitle: str | None = None) -> None:
-    t, _, energy, _, _ = _load_series(log_csv)
+    t, _, energy, _, _, e_fly, e_hover, e_tx = _load_series(log_csv)
     plt.figure(figsize=(7, 4))
-    plt.plot(t, energy, label="Energy (Wh)")
+    plt.plot(t, energy, label="Total Energy (Wh)", linewidth=2)
+    # Plot energy breakdown if available
+    if e_fly and e_hover and e_tx:
+        plt.plot(t, e_fly, label="Flight Energy", linestyle="--", alpha=0.7)
+        plt.plot(t, e_hover, label="Hover Energy", linestyle="--", alpha=0.7)
+        plt.plot(t, e_tx, label="TX Energy", linestyle="--", alpha=0.7)
     plt.xlabel("Time (s)")
     plt.ylabel("Energy (Wh)")
     plt.title("Energy vs Time")

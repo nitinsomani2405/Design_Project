@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, Iterable
+from typing import Tuple, Iterable, Dict, Any, Optional
 import math
 
 
@@ -98,17 +98,179 @@ def flight_time_s(distance_m: float, speed_mps: float) -> float:
     return distance_m / max(speed_mps, 1e-9)
 
 
-def energy_fly_Wh(distance_m: float, speed_mps: float, P_move_W: float) -> float:
+def _compute_induced_velocity(uav_cfg: Dict[str, Any]) -> float:
+    """Compute induced velocity in hover v0 = sqrt(W / (2 * rho * A)).
+    
+    Where W = mass * g (weight in Newtons).
+    """
+    g = float(uav_cfg.get('g', 9.81))
+    mass = float(uav_cfg['mass_kg'])
+    rho = float(uav_cfg['air_density'])
+    
+    # Compute rotor disk area if not provided
+    if 'disc_area_m2' in uav_cfg and uav_cfg['disc_area_m2'] is not None:
+        A = float(uav_cfg['disc_area_m2'])
+    else:
+        rotor_radius = float(uav_cfg['rotor_radius_m'])
+        A = math.pi * (rotor_radius ** 2)
+    
+    W = mass * g  # Weight in Newtons
+    v0 = math.sqrt(W / (2.0 * rho * A))
+    return v0
+
+
+def _compute_induced_power(uav_cfg: Dict[str, Any], v0: float) -> float:
+    """Compute induced power Pi = W * v0.
+    
+    If Pi is provided in config, use it; otherwise compute from weight and v0.
+    """
+    if 'Pi' in uav_cfg and uav_cfg['Pi'] is not None:
+        return float(uav_cfg['Pi'])
+    
+    g = float(uav_cfg.get('g', 9.81))
+    mass = float(uav_cfg['mass_kg'])
+    W = mass * g  # Weight in Newtons
+    Pi = W * v0
+    return Pi
+
+
+def propulsion_power(v: float, uav_cfg: Dict[str, Any], v0: Optional[float] = None, Pi: Optional[float] = None) -> float:
+    """Compute propulsion power using Zeng et al. 2016 model.
+    
+    Formula: P(v) = P0 * (1 + 3*v^2/U_tip^2)
+              + Pi * sqrt(sqrt(1 + v^4/(4*v0^4)) - v^2/(2*v0^2))
+              + 0.5 * d0 * rho * s * A * v^3
+    
+    Args:
+        v: Forward speed (m/s)
+        uav_cfg: UAV configuration dictionary
+        v0: Induced velocity in hover (m/s) - computed if None
+        Pi: Induced power in hover (W) - computed if None
+    
+    Returns:
+        Propulsion power (W)
+    """
+    if v < 0:
+        v = 0.0
+    
+    P0 = float(uav_cfg['P0'])
+    U_tip = float(uav_cfg['blade_tip_speed'])
+    d0 = float(uav_cfg['d0'])
+    rho = float(uav_cfg['air_density'])
+    s = float(uav_cfg['rotor_solidity'])
+    
+    # Compute rotor disk area if not provided
+    if 'disc_area_m2' in uav_cfg and uav_cfg['disc_area_m2'] is not None:
+        A = float(uav_cfg['disc_area_m2'])
+    else:
+        rotor_radius = float(uav_cfg['rotor_radius_m'])
+        A = math.pi * (rotor_radius ** 2)
+    
+    # Compute v0 if not provided
+    if v0 is None:
+        v0 = _compute_induced_velocity(uav_cfg)
+    
+    # Compute Pi if not provided
+    if Pi is None:
+        Pi = _compute_induced_power(uav_cfg, v0)
+    
+    # Profile power term
+    profile = P0 * (1.0 + 3.0 * (v ** 2) / (U_tip ** 2))
+    
+    # Induced power term - handle edge cases carefully
+    if v0 <= 1e-9:
+        # Degenerate case: avoid division by zero
+        induced = Pi
+    else:
+        inside_sqrt = 1.0 + (v ** 4) / (4.0 * (v0 ** 4))
+        # Clamp to non-negative to handle numerical roundoff
+        sqrt_term = math.sqrt(max(inside_sqrt, 0.0))
+        induced_factor = sqrt_term - (v ** 2) / (2.0 * v0 ** 2)
+        # Clamp induced_factor to non-negative
+        induced = Pi * math.sqrt(max(induced_factor, 0.0))
+    
+    # Parasitic drag term
+    parasitic = 0.5 * d0 * rho * s * A * (v ** 3)
+    
+    return profile + induced + parasitic
+
+
+def energy_fly_Wh(distance_m: float, speed_mps: float, uav_cfg: Dict[str, Any], v0: Optional[float] = None, Pi: Optional[float] = None) -> float:
+    """Compute flight energy using Zeng2016 propulsion model.
+    
+    E_fly = P(v) * (d / v) / 3600.0  (converts J to Wh)
+    
+    Args:
+        distance_m: Distance to travel (m)
+        speed_mps: Forward speed (m/s)
+        uav_cfg: UAV configuration dictionary
+        v0: Induced velocity in hover (m/s) - computed if None
+        Pi: Induced power in hover (W) - computed if None
+    
+    Returns:
+        Flight energy (Wh)
+    """
+    if speed_mps <= 0:
+        return float('inf')
+    
+    P = propulsion_power(speed_mps, uav_cfg, v0=v0, Pi=Pi)
     t = flight_time_s(distance_m, speed_mps)
-    return (P_move_W * t) / 3600.0
+    E_J = P * t
+    return E_J / 3600.0  # Convert J to Wh
 
 
-def energy_hover_Wh(t_hover_s: float, P_hover_W: float) -> float:
-    return (P_hover_W * t_hover_s) / 3600.0
+def energy_hover_Wh(t_hover_s: float, uav_cfg: Dict[str, Any], v0: Optional[float] = None, Pi: Optional[float] = None) -> float:
+    """Compute hover energy using Zeng2016 propulsion model.
+    
+    P_hover = P0 + Pi
+    E_hover = P_hover * t_hover / 3600.0  (converts J to Wh)
+    
+    Args:
+        t_hover_s: Hover duration (seconds)
+        uav_cfg: UAV configuration dictionary
+        v0: Induced velocity in hover (m/s) - computed if None
+        Pi: Induced power in hover (W) - computed if None
+    
+    Returns:
+        Hover energy (Wh)
+    """
+    if v0 is None:
+        v0 = _compute_induced_velocity(uav_cfg)
+    if Pi is None:
+        Pi = _compute_induced_power(uav_cfg, v0)
+    
+    P0 = float(uav_cfg['P0'])
+    P_hover = P0 + Pi
+    E_J = P_hover * t_hover_s
+    return E_J / 3600.0  # Convert J to Wh
 
 
-def energy_tx_Wh(t_tx_s: float, P_tx_W: float) -> float:
-    return (P_tx_W * t_tx_s) / 3600.0
+def energy_tx_Wh(t_tx_s: float, tx_cfg: Dict[str, Any], P_out_W: Optional[float] = None) -> float:
+    """Compute transmission energy including circuit power and PA efficiency.
+    
+    P_tx = P_circuit + P_out / eta_amp
+    E_tx = P_tx * t_tx / 3600.0  (converts J to Wh)
+    
+    Args:
+        t_tx_s: Transmission duration (seconds)
+        tx_cfg: Transmission configuration dictionary
+        P_out_W: Output power (W) - from tx_cfg if None
+    
+    Returns:
+        Transmission energy (Wh)
+    """
+    P_circ = float(tx_cfg['P_circuit_W'])
+    eta = float(tx_cfg['amp_efficiency'])
+    
+    if P_out_W is None:
+        P_out_W = float(tx_cfg.get('P_out_W', 1.0))
+    
+    if eta <= 0:
+        eta = 1.0  # Avoid division by zero
+    
+    P_tx = P_circ + (P_out_W / eta)
+    E_J = P_tx * t_tx_s
+    return E_J / 3600.0  # Convert J to Wh
 
 
 def total_path_length(points: Iterable[Tuple[float, float]]) -> float:

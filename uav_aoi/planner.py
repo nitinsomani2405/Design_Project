@@ -25,8 +25,26 @@ def policy_awn(
     beta: float,
     gamma: float,
 ) -> int:
-    """Age-Weighted-Nearest scoring: score = AoI^beta / (dist^gamma + 1e-6)."""
-
+    """Age-Weighted-Nearest scoring: score = AoI^beta / (dist^gamma + 1e-6).
+    
+    When all AoI values are 0, uses distance-based selection (closest node).
+    This ensures beta/gamma have an effect once AoI values start to differ.
+    """
+    # Check if all AoI values are effectively zero
+    max_aoi = max(aoi) if aoi else 0.0
+    if max_aoi < 1e-6:
+        # All AoI are zero - use distance-based selection (closest node)
+        # This is a tie-breaker when beta/gamma can't differentiate
+        best_idx = 0
+        best_dist = math.inf
+        for i, pos in enumerate(node_positions):
+            d = euclidean(uav_pos, pos)
+            if d < best_dist:
+                best_dist = d
+                best_idx = i
+        return best_idx
+    
+    # Normal AWN scoring when AoI values are non-zero
     best_idx = 0
     best_score = -math.inf
     for i, age in enumerate(aoi):

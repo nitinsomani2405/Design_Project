@@ -48,14 +48,20 @@ python main.py --config configs/default.yaml compare-policies --out runs
 ## Config
 See `configs/default.yaml` for defaults:
 - field_size, N, mission_time_s
-- uav: speed_mps, battery_Wh, P_move_W, P_hover_W, P_tx_W
+- uav: Zeng propulsion parameters (mass_kg, rotor_radius_m, P0, Pi, d0, blade_tip_speed, etc.), speed_mps, battery_Wh
 - radio: bandwidth_Hz, noise_W, pathloss_exponent, snr_threshold_linear, comm_radius_m
+- tx: P_circuit_W, amp_efficiency, P_out_W
 - payload_bits, policy, beta, gamma, alpha, seed
+
+See `docs/FORMULAS.md` for detailed energy model equations.
 
 ## Models
 - AoI: increments by Δt each step; on successful service: AoI_i ← 0
 - Flight: constant speed v, time=d/v
-- Energy: E_fly=P_move*(d/v), E_hover=P_hover*t_hover, E_tx=P_tx*t_tx
+- Energy: **Zeng et al. (2016) propulsion model** for realistic UAV energy consumption
+  - Flight: P(v) = P₀(1+3v²/U_tip²) + P_i·√(√(1+v⁴/(4v₀⁴))-v²/(2v₀²)) + ½d₀ρsAv³
+  - Hover: P_hover = P₀ + P_i
+  - Transmission: P_tx = P_circuit + P_out/η_amp
 - Rate: R=B*log2(1+SNR); SNR from path-loss; t_tx=payload_bits/R
 - Success: within comm radius OR SNR>threshold (implemented as either condition)
 

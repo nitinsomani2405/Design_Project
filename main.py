@@ -25,16 +25,28 @@ import yaml
 
 
 def build_uav_radio(cfg: Dict[str, Any]) -> tuple[UAV, Radio]:
+    """Build UAV and Radio objects from config.
+    
+    UAV dataclass still has P_move_W, P_hover_W, P_tx_W for backward compatibility,
+    but they are not used with the new Zeng propulsion model. Energy functions
+    now take config dictionaries directly.
+    """
     uav_cfg = cfg["uav"]
     radio_cfg = cfg["radio"]
+    
+    # Get legacy power values if present, otherwise use defaults (not used in new model)
+    P_move_W = float(uav_cfg.get("P_move_W", 180.0))
+    P_hover_W = float(uav_cfg.get("P_hover_W", 140.0))
+    P_tx_W = float(uav_cfg.get("P_tx_W", 2.0))
+    
     uav = UAV(
         x=0.0,
         y=0.0,
         speed_mps=float(uav_cfg["speed_mps"]),
         battery_Wh=float(uav_cfg["battery_Wh"]),
-        P_move_W=float(uav_cfg["P_move_W"]),
-        P_hover_W=float(uav_cfg["P_hover_W"]),
-        P_tx_W=float(uav_cfg["P_tx_W"]),
+        P_move_W=P_move_W,
+        P_hover_W=P_hover_W,
+        P_tx_W=P_tx_W,
     )
     radio = Radio(
         bandwidth_Hz=float(radio_cfg["bandwidth_Hz"]),
@@ -160,11 +172,12 @@ def build_subtitle(cfg: Dict[str, Any]) -> str:
     u = cfg["uav"]
     r = cfg["radio"]
     payload_mb = cfg.get("payload_bits", 1_600_000) / 1_000_000
+    energy_model = "Zeng2016 (propulsion P(v))" if "mass_kg" in u else "Simple"
     return (
         f"Policy={cfg['policy']} | Seed={cfg['seed']} | "
         f"β={cfg['beta']:.2f} | γ={cfg['gamma']:.2f} | α={cfg['alpha']:.2f} | "
         f"N={cfg['N']} | T={cfg['mission_time_s']} | Battery={u['battery_Wh']}Wh | "
-        f"Payload={payload_mb:.1f}Mb | R={r['comm_radius_m']}m"
+        f"Payload={payload_mb:.1f}Mb | R={r['comm_radius_m']}m | Energy model: {energy_model}"
     )
 
 
@@ -196,7 +209,10 @@ def do_run(args: argparse.Namespace) -> None:
         hover_cap_s=None,
     )
     # Pass session_dir to simulate - it will save log.csv there
-    summary = simulate(nodes, uav, radio, params, seed, run_dir=session_dir)
+    # Pass uav_cfg and tx_cfg for Zeng propulsion model
+    uav_cfg = cfg.get("uav", {})
+    tx_cfg = cfg.get("tx", {})
+    summary = simulate(nodes, uav, radio, params, seed, run_dir=session_dir, uav_cfg=uav_cfg, tx_cfg=tx_cfg)
 
     # Save resolved config for traceability (must match plot footers)
     with open(os.path.join(session_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
@@ -236,13 +252,21 @@ def do_sweep_alpha(args: argparse.Namespace) -> None:
     if alpha_override is not None:
         args.alpha = alpha_override  # Restore if was set
     
+    # CRITICAL: Force AWN policy and greedy_mode for alpha sweep
+    # This ensures beta/gamma changes actually affect behavior
+    cfg["policy"] = "AWN"
+    cfg["greedy_mode"] = True
+    
     seed = int(cfg.get("seed", 42))
     rng = np.random.default_rng(seed)
     N = int(cfg["N"])
     field_size = tuple(cfg["field_size"])  # type: ignore[assignment]
     uav_base, radio = build_uav_radio(cfg)
-    # Same nodes for all alpha values
-    nodes = init_nodes_random(N, (float(field_size[0]), float(field_size[1])), rng)
+    
+    # Initialize nodes once - same environment for all alpha values (fair comparison)
+    # The planner will be re-initialized inside simulate() for each alpha iteration
+    # Create a fresh RNG with the same seed for node initialization
+    nodes_base = init_nodes_random(N, (float(field_size[0]), float(field_size[1])), rng)
     
     # Parse --alphas if provided, otherwise default to [0, 0.25, 0.5, 0.75, 1.0]
     if hasattr(args, "alphas") and args.alphas:
@@ -256,13 +280,10 @@ def do_sweep_alpha(args: argparse.Namespace) -> None:
     beta_min, beta_max = 0.8, 1.6
     gamma_min, gamma_max = 0.6, 1.6
     
-    # Ensure policy is AWN for alpha to have effect (or use greedy mode)
-    policy_for_sweep = str(cfg.get("policy", "AWN"))
-    if policy_for_sweep.upper() not in ["AWN"]:
-        print(f"Warning: Policy is {policy_for_sweep}, but alpha sweep works best with AWN. Using AWN for sweep.")
-        policy_for_sweep = "AWN"
-    
     results_csv = os.path.join(session_dir, "pareto_results.csv")
+    
+    print(f"Sweeping alpha with AWN policy (greedy_mode=True)")
+    print(f"  Seed: {seed}, Nodes: {N}, Field: {field_size}")
     
     with open(results_csv, "w", newline="") as f:
         writer = csv.writer(f)
@@ -271,6 +292,11 @@ def do_sweep_alpha(args: argparse.Namespace) -> None:
             # Dynamically adjust β and γ based on α
             beta_val = beta_min + alpha_val * (beta_max - beta_min)
             gamma_val = gamma_max - alpha_val * (gamma_max - gamma_min)
+            
+            # CRITICAL: Create a fresh copy of nodes for each iteration
+            # This ensures no state persists between alpha runs
+            from uav_aoi.env import Node
+            nodes = [Node(n.node_id, n.x, n.y) for n in nodes_base]
             
             # Fresh UAV per run
             uav = UAV(
@@ -282,25 +308,43 @@ def do_sweep_alpha(args: argparse.Namespace) -> None:
                 P_hover_W=uav_base.P_hover_W,
                 P_tx_W=uav_base.P_tx_W,
             )
+            
+            # SimParams with current alpha, beta, gamma - policy is AWN, greedy_mode=True
             params = SimParams(
                 field_size=(float(field_size[0]), float(field_size[1])),
                 mission_time_s=float(cfg["mission_time_s"]),
                 payload_bits=int(cfg["payload_bits"]),
-                policy=policy_for_sweep,
+                policy="AWN",  # Explicitly set to AWN
                 beta=float(beta_val),
                 gamma=float(gamma_val),
                 alpha=float(alpha_val),
                 greedy_mode=True,  # Force greedy mode so β/γ changes affect behavior
                 hover_cap_s=None,
             )
+            
             # Each simulate call creates its own log.csv in session_dir
             # Use a subfolder or unique name to avoid overwriting
             alpha_dir = os.path.join(session_dir, f"alpha_{alpha_val:.2f}")
-            summary = simulate(nodes, uav, radio, params, seed, run_dir=alpha_dir)
+            # Verify params before simulation
+            assert params.policy == "AWN", f"Policy must be AWN, got {params.policy}"
+            assert params.greedy_mode == True, f"greedy_mode must be True, got {params.greedy_mode}"
+            assert abs(params.beta - beta_val) < 1e-6, f"Beta mismatch: {params.beta} vs {beta_val}"
+            assert abs(params.gamma - gamma_val) < 1e-6, f"Gamma mismatch: {params.gamma} vs {gamma_val}"
+            
+            # Debug: Print actual params being used
+            if alpha_val == 0.0 or alpha_val == 0.25:
+                print(f"    DEBUG α={alpha_val}: params.beta={params.beta}, params.gamma={params.gamma}, policy={params.policy}, greedy={params.greedy_mode}")
+            
+            # Pass uav_cfg and tx_cfg for Zeng propulsion model
+            uav_cfg = cfg.get("uav", {})
+            tx_cfg = cfg.get("tx", {})
+            summary = simulate(nodes, uav, radio, params, seed, run_dir=alpha_dir, uav_cfg=uav_cfg, tx_cfg=tx_cfg)
             m = compute_metrics(summary["log_csv"])
             energy_norm = m["total_energy_Wh"] / max(summary["E_max_Wh"], 1e-9)
             writer.writerow([alpha_val, m["avg_aoi"], energy_norm, beta_val, gamma_val])
-            print(f"  α={alpha_val:.2f} (β={beta_val:.2f}, γ={gamma_val:.2f}): avg_aoi={m['avg_aoi']:.2f}s, energy_norm={energy_norm:.3f}")
+            visited = summary.get("visited_nodes", [])
+            first_5 = visited[:5] if len(visited) >= 5 else visited
+            print(f"  α={alpha_val:.2f} (β={beta_val:.2f}, γ={gamma_val:.2f}): avg_aoi={m['avg_aoi']:.2f}s, energy_norm={energy_norm:.3f} [first_5_nodes={first_5}]")
 
     # Save resolved config (with representative alpha, e.g., 0.5) - must match plot footer
     cfg_save = copy.deepcopy(cfg)
@@ -308,7 +352,8 @@ def do_sweep_alpha(args: argparse.Namespace) -> None:
     # Use corresponding β and γ for α=0.5
     cfg_save["beta"] = beta_min + 0.5 * (beta_max - beta_min)
     cfg_save["gamma"] = gamma_max - 0.5 * (gamma_max - gamma_min)
-    cfg_save["policy"] = policy_for_sweep
+    cfg_save["policy"] = "AWN"  # Explicitly set to AWN
+    cfg_save["greedy_mode"] = True  # Explicitly set greedy_mode
     with open(os.path.join(session_dir, "resolved_config.yaml"), "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg_save, f, sort_keys=False)
 
@@ -393,7 +438,10 @@ def do_compare_policies(args: argparse.Namespace) -> None:
             
             # Each policy gets its own subfolder to avoid log.csv overwrites
             policy_dir = os.path.join(session_dir, policy.lower())
-            summary = simulate(nodes, uav, radio, params, policy_seed, run_dir=policy_dir)
+            # Pass uav_cfg and tx_cfg for Zeng propulsion model
+            uav_cfg = cfg_policy.get("uav", {})
+            tx_cfg = cfg_policy.get("tx", {})
+            summary = simulate(nodes, uav, radio, params, policy_seed, run_dir=policy_dir, uav_cfg=uav_cfg, tx_cfg=tx_cfg)
             m = compute_metrics(summary["log_csv"])
             writer.writerow([policy, m["avg_aoi"], m["total_energy_Wh"]])
             print(f"  {policy}: avg_aoi={m['avg_aoi']:.2f}s, energy={m['total_energy_Wh']:.3f}Wh")

@@ -2,17 +2,31 @@ field_size: [1000, 1000]
 N: 30
 mission_time_s: 1200
 uav:
-  speed_mps: 12
-  battery_Wh: 60
-  P_move_W: 180
-  P_hover_W: 140
-  P_tx_W: 2
+  # Physical parameters for Zeng2016 propulsion model
+  mass_kg: 1.5              # Drone mass (kg)
+  g: 9.81                   # Gravity acceleration (m/s^2)
+  rotor_radius_m: 0.15      # Rotor blade radius (m)
+  disc_area_m2: 0.0707      # Rotor disk area (m^2) - π * r^2, computed if omitted
+  blade_tip_speed: 140.0    # Rotor blade tip speed U_tip (m/s)
+  rotor_solidity: 0.05      # Rotor solidity s (dimensionless)
+  P0: 10.0                  # Profile/blade power baseline (W)
+  Pi: null                  # Induced power in hover (W) - null means compute Pi = W * v0
+  d0: 0.3                   # Fuselage drag coefficient (dimensionless)
+  air_density: 1.225        # Air density rho (kg/m^3)
+  # Motion parameters
+  speed_mps: 12             # Forward flight speed (m/s)
+  battery_Wh: 60            # Battery capacity (Wh)
 radio:
   bandwidth_Hz: 1000000
   noise_W: 1.0e-9
   pathloss_exponent: 2.7
   snr_threshold_linear: 3.0
   comm_radius_m: 220
+tx:
+  # Transmission parameters
+  P_circuit_W: 1.0          # Circuit/base power (W)
+  amp_efficiency: 0.4       # Power amplifier efficiency η (dimensionless, 0-1)
+  P_out_W: 1.0              # Output power (W) for P_tx = P_circuit + P_out/η
 payload_bits: 1600000
 policy: "AWN"
 beta: 1.0
